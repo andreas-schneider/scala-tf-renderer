@@ -8,6 +8,10 @@ Features:
 * spherical harmonics illumination
 * optimize for color, pose, illumination, vertex position, camera parameters. 
 
+Contributors:
+* Thomas Gerig
+* Adam Kortylewski
+* Andreas Schneider
 
 Please cite: 
 ```latex
