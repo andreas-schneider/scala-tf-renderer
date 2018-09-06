@@ -15,8 +15,10 @@ credentials +=Credentials(Path.userHome /".ivy2" /".credentials-statismo-private
 libraryDependencies  ++= Seq(
   "org.platanios" %% "tensorflow" % "0.2.0",
     "org.platanios" %% "tensorflow" % "0.2.0" classifier "linux-gpu-x86_64",
-  "org.bytedeco.javacpp-presets" % "opencv-platform" % "3.4.1-1.4.1",
-  "org.bytedeco.javacpp-presets" % "opencv" % "3.4.1-1.4.1" classifier "linux-x86_64",
+  //"org.platanios" %% "tensorflow" % "0.2.4" classifier "linux-cpu-x86_64",
+
+//  "org.bytedeco.javacpp-presets" % "opencv-platform" % "3.4.1-1.4.1",
+//  "org.bytedeco.javacpp-presets" % "opencv" % "3.4.1-1.4.1" classifier "linux-x86_64",
 //  "org.platanios" %% "tensorflow-data" % "0.1.1"
 
 //    "ch.unibas.cs.gravis" %% "faces-scala" % "0.9.0-RC1", 

@@ -8,6 +8,7 @@ import org.platanios.tensorflow.api.{tf, _}
 import scalismo.faces.color.{RGB, RGBA}
 import scalismo.faces.io.{MeshIO, MoMoIO, PixelImageIO, RenderParameterIO}
 import scalismo.faces.mesh.{ColorNormalMesh3D, VertexColorMesh3D}
+import scalismo.faces.momo.MoMo
 import scalismo.faces.parameters._
 import scalismo.geometry.Point
 import scalismo.mesh.TriangleMesh3D
@@ -48,15 +49,21 @@ object Example {
     val initCamera = TFCamera(param.camera)
     val initLight = TFConversions.pointsToTensor(param.environmentMap.coefficients).transpose()
 
-    val renderer = TFRenderer(tfMesh, initPose, initCamera, initLight, param.imageSize.width, param.imageSize.height)
+    //val variableModel = new OffsetFromInitializationModel(tfMesh.pts, tfMesh.colors, initPose, initCamera, initLight)
+    val tfModel = TFMoMo(model.expressionModel.get.truncate(80,40, 5))
+    val tfMean = TFMesh(model.neutralModel.mean)
+
+    val variableModel = TFMoMoExpressParameterModel(tfModel, tfMean, initPose, initCamera, initLight)
+
+    val renderer = TFRenderer(tfMesh, variableModel.pts, variableModel.colors, variableModel.pose, variableModel.camera, variableModel.illumination, param.imageSize.width, param.imageSize.height)
 
     def renderInitialParametersAndCompareToGroundTruth() = {
       val sess = Session()
       sess.run(targets=tf.globalVariablesInitializer())
 
       val result = sess.run(
-        feeds = renderer.feeds,
-        fetches = Seq(renderer.shShader, renderer.worldNormals)
+        feeds = variableModel.feeds,
+        fetches = Seq(renderer.shShader)
       )
 
       val tensorImg = result(0).toTensor
@@ -78,38 +85,89 @@ object Example {
 
     //loss
     val target = tf.placeholder(FLOAT32, Shape(param.imageSize.height, param.imageSize.width, 3), "target")
-    val reg = TFMeshOperations.vertexToNeighbourDistance(tfMesh.adjacentPoints, renderer.normals)
-    val rec = tf.sum(tf.mean(tf.abs(target - renderer.shShader)))
-    println("reg", reg)
+
+    //val reg = TFMeshOperations.vertexToNeighbourDistance(tfMesh.adjacentPoints, renderer.ptsOffset)
+
+    val vtxsPerTriangle = tf.gather(renderer.normals, renderer.mesh.triangles)
+    println("vtxsPerTriangle", vtxsPerTriangle)
+    //println("validIds", validIds)
+    //val regPre = tf.tile(tf.expandDims(validIds, 1), Seq(1, 3, 1)) * vtxsPerTriangle
+    //rintln("regPre", regPre)
+    //val reg = tf.sum(vtxsPerTriangle)
+    val reg = tf.sum(tf.abs(variableModel.ptsVar))
+
+    val validArea = tf.tile(tf.expandDims(renderer.triangleIdsAndBCC.triangleIds > 0, 2), Seq(1,1,3))
+
+    val rec = tf.sum(tf.mean(tf.abs(target*validArea - renderer.shShader*validArea)))
+
+    val pixelFGLH = {
+      val sdev = 0.0043f // sdev corresponding to very good fit so this can be smaller than 0.043
+      val normalizer = (-3 / 2 * math.log(2 * math.Pi) - 3 * math.log(sdev)).toFloat
+      tf.sum(tf.square(target - renderer.shShader),axes=Seq(2))*(-0.5f) / sdev/sdev + normalizer
+    }
+
+    val pixelBGLH = {
+      val sdev = 0.25f
+      val normalizer = (-3 / 2 * math.log(2 * math.Pi) - 3 * math.log(sdev)).toFloat
+      tf.sum(tf.square(target - renderer.shShader),axes=Seq(2))*(-0.5f) / sdev/sdev + normalizer
+    }
+
+    println("pxielFGLH", pixelFGLH)
+    println("pxielBGLH", pixelBGLH)
+
+    val lh = tf.mean(pixelFGLH - pixelBGLH)
+
+    /*
+    val dDiff = shapeCoeff.foldLeft(0.0) { (z: Double, v: Double) => z + math.pow(v - mean, 2) / sdev / sdev }
+        val dNorm = -0.5 * shapeCoeff.size * math.log(2 * math.Pi) - shapeCoeff.size * math.log(sdev)
+        dNorm - 0.5 * dDiff
+     */
+    val shapePrior = {
+      val n = variableModel.ptsVar.shape(0)
+      val s = tf.cumsum(tf.square(variableModel.ptsVar))
+      -0.5f* n *math.log(2*math.Pi) - 0.5f*s(n-1)
+    }
+
+
+    //println("reg", reg)
     println("rec", rec)
-    val loss = rec //+ reg
+    //val loss = rec + reg / 37f / 1000f  //+ reg * 0.1f
+
+    //val shapeLH = -0.5
+
+    val loss = - (lh + shapePrior)
 
     println("loss", loss)
 
     val grad: Seq[OutputLike] = Gradients.gradients(
       Seq(loss),
       Seq(
-        //renderer.colorsOffset,
-        renderer.ptsOffset
+        variableModel.ptsVar, variableModel.colorsVar,
+        variableModel.illumVar,
+        variableModel.poseRotVar
       )
     )
     val optimizer = tf.train.AMSGrad(0.1, name="adal")
     val optFn = optimizer.applyGradients(
       Seq(
-      (grad(0), renderer.ptsOffset)
+      (grad(0), variableModel.ptsVar),
+        (grad(1), variableModel.colorsVar),
+        (grad(2), variableModel.illumVar),
+        (grad(3), variableModel.poseRotVar)
     ))
+
 
     val session = Session()
     session.run(targets=tf.globalVariablesInitializer())
 
-    for(i <- 0 until 60) {
+    for(i <- 0 to 180) {
       val result = session.run(
-        feeds = Map(target -> targetImage) ++ renderer.feeds,
-        fetches = Seq(renderer.shShader, loss, reg, rec),
-        targets = optFn
+        feeds = Map(target -> targetImage) ++ variableModel.feeds,
+        fetches = Seq(renderer.shShader, loss, rec, lh, shapePrior),
+        targets = Seq(optFn)
       )
 
-      println(s"iter ${i}", result(1).toTensor.summarize(), result(2).toTensor.summarize(), result(3).toTensor.summarize())
+      println(s"iter ${i}", result(1).toTensor.summarize(), result(2).toTensor.summarize(), result(3).toTensor.summarize(), result(4).toTensor.summarize())
 
       if(i % 30 == 0) {
         val rendering = TFConversions.oneToOneTensorImage3dToPixelImage(result(0).toTensor)
@@ -118,7 +176,7 @@ object Example {
     }
 
     val fetch = session.run(
-      feeds = Map(target -> targetImage) ++ renderer.feeds,
+      feeds = Map(target -> targetImage) ++ variableModel.feeds,
       fetches = Seq(renderer.pts, loss)
     )
 
